@@ -32,7 +32,7 @@ public class FileOperations {
             let path = FileManager.default.string(withFileSystemRepresentation: home, length: strlen(home))
             return URL(fileURLWithPath: path)
         }
-        return URL(fileURLWithPath: "/Users/\(NSUserName())")
+        return FileManager.default.homeDirectoryForCurrentUser
     }()
     
     public static let downloadsURL: URL = realHomeURL.appendingPathComponent("Downloads")
@@ -220,7 +220,7 @@ public class FileOperations {
         var candidate = targetURL
         var counter = 1
         
-        while fileManager.fileExists(atPath: candidate.path) {
+        while fileManager.fileExists(atPath: candidate.path) && counter < 5000 {
             let newName: String
             if ext.isEmpty {
                 newName = "\(filenameWithoutExt) (\(counter))"
@@ -489,6 +489,7 @@ public class FileOperations {
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            process.standardInput = FileHandle.nullDevice
             var args = ["-c", "-k", "--sequesterRsrc"]
             for url in urls {
                 args.append("--keepParent")
@@ -572,6 +573,7 @@ public class FileOperations {
             if ext == "zip" {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                p.standardInput = FileHandle.nullDevice
                 p.arguments = ["-x", "-k", archiveURL.path, destFolder.path]
                 do {
                     try p.run()
@@ -585,6 +587,7 @@ public class FileOperations {
                 if !success {
                     let unzipProc = Process()
                     unzipProc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+                    unzipProc.standardInput = FileHandle.nullDevice
                     unzipProc.arguments = ["-q", "-o", "-P", "", archiveURL.path, "-d", destFolder.path]
                     try? unzipProc.run()
                     unzipProc.waitUntilExit()
@@ -598,6 +601,7 @@ public class FileOperations {
             } else if ["tar", "gz", "tgz", "bz2", "tbz", "xz", "txz"].contains(ext) {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+                p.standardInput = FileHandle.nullDevice
                 p.arguments = ["-xf", archiveURL.path, "-C", destFolder.path]
                 do {
                     try p.run()
@@ -677,6 +681,7 @@ public class FileOperations {
             
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            p.standardInput = FileHandle.nullDevice
             p.arguments = ["-q", "-o", "-P", password, archiveURL.path, "-d", destFolder.path]
             try? p.run()
             p.waitUntilExit()
@@ -739,6 +744,7 @@ public class FileOperations {
                     // Password protected zip
                     let p = Process()
                     p.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+                    p.standardInput = FileHandle.nullDevice
                     p.currentDirectoryURL = parentDir
                     var args = ["-q", "-r", "-P", pwd, destURL.path]
                     for url in sourceURLs {
@@ -755,6 +761,7 @@ public class FileOperations {
                 } else {
                     let p = Process()
                     p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                    p.standardInput = FileHandle.nullDevice
                     var args = ["-c", "-k", "--sequesterRsrc"]
                     for url in sourceURLs {
                         args.append("--keepParent")
@@ -773,6 +780,7 @@ public class FileOperations {
             } else {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+                p.standardInput = FileHandle.nullDevice
                 p.currentDirectoryURL = parentDir
                 var args = ["-czf", destURL.path]
                 for url in sourceURLs {

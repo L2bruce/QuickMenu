@@ -1,19 +1,52 @@
 import Cocoa
 import FinderSync
+import ServiceManagement
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     
     var statusItem: NSStatusItem?
     private var dirSource: DispatchSourceFileSystemObject?
     private var watchedFd: Int32 = -1
+    private var fallbackTimer: Timer?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 1. 单实例保护：避免重复多开造成指令重复执行
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.bruce.QuickMenu"
+        let currentPid = ProcessInfo.processInfo.processIdentifier
+        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+        if runningApps.contains(where: { $0.processIdentifier != currentPid }) {
+            FileOperations.log("[HostApp] Another instance is already running. Exiting.")
+            NSApp.terminate(nil)
+            return
+        }
+        
+        // 2. 注册系统睡眠与屏幕唤醒通知，保证合盖/锁屏唤醒后自愈
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWakeNotification),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWakeNotification),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil
+        )
+        
         cleanLegacyDebugLogs()
         enableExtension()
         setupStatusBar()
         ensureDefaultTemplates()
         setupCommandWatcher()
         FileOperations.log("[HostApp] Running (Unsandboxed Manager).")
+    }
+    
+    @objc private func handleWakeNotification() {
+        FileOperations.log("[HostApp] System woke up, refreshing extension and command watcher...")
+        enableExtension()
+        let containerDir = ("~/Library/Containers/com.bruce.QuickMenu.QuickMenuSyncExtension/Data" as NSString).expandingTildeInPath
+        checkAndExecuteCommands(containerDir: containerDir)
     }
     
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -56,11 +89,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        fallbackTimer?.invalidate()
         dirSource?.cancel()
         disableExtensionAndCleanup()
     }
     
-    // MARK: - Command Watcher (Kernel DispatchSource)
+    // MARK: - Command Watcher (Kernel DispatchSource + Gentle Fallback)
     private func setupCommandWatcher() {
         let containerDir = ("~/Library/Containers/com.bruce.QuickMenu.QuickMenuSyncExtension/Data" as NSString).expandingTildeInPath
         let fm = FileManager.default
@@ -87,25 +121,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         source.resume()
         self.dirSource = source
         
+        // 兜底心跳：每 2.5 秒温和扫描一次，防止系统极高负载下内核事件偶发丢通知
+        fallbackTimer?.invalidate()
+        fallbackTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+            self?.checkAndExecuteCommands(containerDir: containerDir)
+        }
+        
         checkAndExecuteCommands(containerDir: containerDir)
     }
     
     private func checkAndExecuteCommands(containerDir: String) {
-        let cmdFile = containerDir + "/command.json"
         let fm = FileManager.default
-        guard fm.fileExists(atPath: cmdFile) else { return }
+        guard let files = try? fm.contentsOfDirectory(atPath: containerDir) else { return }
         
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: cmdFile)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let command = json["command"] as? String else {
-            FileOperations.log("[HostApp] command.json exists but unreadable/incomplete, will retry")
-            return
+        // 查找所有待处理指令文件 (包括兼容旧版 command.json 以及新的 cmd_*.json 队列)
+        let cmdFiles = files.filter { ($0.hasPrefix("cmd_") && $0.hasSuffix(".json")) || $0 == "command.json" }.sorted()
+        
+        for file in cmdFiles {
+            let filePath = (containerDir as NSString).appendingPathComponent(file)
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let command = json["command"] as? String else {
+                // 如果格式无法解析且已不是正在写入的临时文件，清理掉
+                if !file.hasPrefix("tmp_") {
+                    try? fm.removeItem(atPath: filePath)
+                }
+                continue
+            }
+            
+            try? fm.removeItem(atPath: filePath)
+            FileOperations.log("[HostApp] Executing command from \(file): \(command)")
+            executeCommand(command: command, params: json)
         }
-        
-        try? fm.removeItem(atPath: cmdFile)
-        
-        FileOperations.log("[HostApp] Executing command: \(command), params: \(json)")
-        executeCommand(command: command, params: json)
     }
     
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -353,19 +400,89 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.toolTip = "QuickMenu - 访达右键增强"
         }
         
+        updateStatusBarMenu()
+    }
+    
+    private func updateStatusBarMenu() {
+        guard let statusItem = statusItem else { return }
         let menu = NSMenu()
+        
+        let titleItem = NSMenuItem(title: "⚡️ QuickMenu 访达右键增强", action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        menu.addItem(titleItem)
+        
+        let statusItemNotice = NSMenuItem(title: "🟢 状态：运行中 (已就绪)", action: nil, keyEquivalent: "")
+        statusItemNotice.isEnabled = false
+        menu.addItem(statusItemNotice)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // 开机自启动
+        var isLaunchAtLogin = false
+        if #available(macOS 13.0, *) {
+            isLaunchAtLogin = (SMAppService.mainApp.status == .enabled)
+        }
+        let launchItem = NSMenuItem(
+            title: isLaunchAtLogin ? "✓ 🚀 开机自动启动" : "🚀 开机自动启动",
+            action: #selector(toggleLaunchAtLogin),
+            keyEquivalent: ""
+        )
+        launchItem.target = self
+        menu.addItem(launchItem)
+        
+        // 打开模板目录
+        let tmplItem = NSMenuItem(title: "📂 打开自定义模板目录...", action: #selector(openTemplatesDir), keyEquivalent: "t")
+        tmplItem.target = self
+        menu.addItem(tmplItem)
+        
+        // 重启访达（右键假死自愈利器）
+        let restartFinderItem = NSMenuItem(title: "🔄 重启访达 (刷新右键)", action: #selector(restartFinder), keyEquivalent: "r")
+        restartFinderItem.target = self
+        menu.addItem(restartFinderItem)
+        
+        menu.addItem(NSMenuItem.separator())
         
         let hideItem = NSMenuItem(title: "关闭菜单栏显示", action: #selector(hideStatusBarItem), keyEquivalent: "h")
         hideItem.target = self
         menu.addItem(hideItem)
         
-        menu.addItem(NSMenuItem.separator())
-        
         let quitItem = NSMenuItem(title: "退出主程序", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
         
-        statusItem?.menu = menu
+        statusItem.menu = menu
+    }
+    
+    @objc private func toggleLaunchAtLogin() {
+        if #available(macOS 13.0, *) {
+            do {
+                if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
+                } else {
+                    try SMAppService.mainApp.register()
+                }
+            } catch {
+                FileOperations.log("[HostApp] SMAppService toggle error: \(error)")
+            }
+            updateStatusBarMenu()
+        }
+    }
+    
+    @objc private func openTemplatesDir() {
+        NSWorkspace.shared.open(FileOperations.userTemplatesDirectory)
+    }
+    
+    @objc private func restartFinder() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        p.arguments = ["Finder"]
+        p.standardInput = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.enableExtension()
+        }
     }
     
     @objc private func hideStatusBarItem() {

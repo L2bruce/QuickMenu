@@ -67,9 +67,11 @@
 
 ---
 
-## 🛠️ 一键构建与更新
+## 🛠️ 一键构建与安装
 
 ```bash
-cd /Users/bruce/PycharmProjects/QuickMenu
+git clone https://github.com/L2bruce/QuickMenu.git
+cd QuickMenu
+chmod +x build.sh
 ./build.sh
 ```

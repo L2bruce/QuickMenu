@@ -278,19 +278,18 @@ public class QuickMenuSyncExtension: FIFinderSync {
         return [resolveTargetFolder()]
     }
     
-    // MARK: - Dispatch Command to Host App (Atomic file write)
+    // MARK: - Dispatch Command to Host App (Unique Atomic file write into FIFO Queue)
     private func dispatchCommand(_ payload: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: .prettyPrinted) else { return }
         let containerDir = NSHomeDirectory()
-        let tmpFileURL = URL(fileURLWithPath: containerDir).appendingPathComponent("command_tmp.json")
-        let cmdFileURL = URL(fileURLWithPath: containerDir).appendingPathComponent("command.json")
+        let uuid = UUID().uuidString
+        let timestamp = Int(Date().timeIntervalSince1970 * 1000)
+        let tmpFileURL = URL(fileURLWithPath: containerDir).appendingPathComponent("tmp_\(uuid).json")
+        let cmdFileURL = URL(fileURLWithPath: containerDir).appendingPathComponent("cmd_\(timestamp)_\(uuid).json")
         do {
             try data.write(to: tmpFileURL)
-            if FileManager.default.fileExists(atPath: cmdFileURL.path) {
-                try? FileManager.default.removeItem(at: cmdFileURL)
-            }
             try FileManager.default.moveItem(at: tmpFileURL, to: cmdFileURL)
-            FileOperations.log("Dispatched command atomically: \(payload)")
+            FileOperations.log("Dispatched command queued: \(payload)")
         } catch {
             FileOperations.log("Failed to dispatch command: \(error)")
         }

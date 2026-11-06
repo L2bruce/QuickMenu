@@ -1,0 +1,25 @@
+# macOS 系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon\r\r
+
+# 构建与打包输出 (包含二进制应用、appex扩展和签名缓存)
+build/
+*.app/
+*.appex/
+*.dSYM/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE 与 编辑器配置
+.idea/
+.vscode/
+*.xcodeproj/
+*.xcworkspace/
+
+# 本地调试日志
+*.log
