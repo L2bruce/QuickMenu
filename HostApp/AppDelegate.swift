@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var dirSource: DispatchSourceFileSystemObject?
     private var watchedFd: Int32 = -1
     private var fallbackTimer: Timer?
+    private var isExecutingCommands = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 1. 单实例保护：避免重复多开造成指令重复执行
@@ -121,16 +122,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         source.resume()
         self.dirSource = source
         
-        // 兜底心跳：每 2.5 秒温和扫描一次，防止系统极高负载下内核事件偶发丢通知
+        // 兜底心跳：每 15 秒温和扫描一次，并设置 3 秒容差，极大降低持续唤醒 CPU 能耗
         fallbackTimer?.invalidate()
-        fallbackTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 15.0, repeats: true) { [weak self] _ in
             self?.checkAndExecuteCommands(containerDir: containerDir)
         }
+        timer.tolerance = 3.0
+        RunLoop.main.add(timer, forMode: .common)
+        self.fallbackTimer = timer
         
         checkAndExecuteCommands(containerDir: containerDir)
     }
     
     private func checkAndExecuteCommands(containerDir: String) {
+        guard !isExecutingCommands else {
+            FileOperations.log("[HostApp] Command execution already in progress, skipping to prevent RunLoop reentrancy.")
+            return
+        }
+        isExecutingCommands = true
+        defer {
+            isExecutingCommands = false
+        }
+        
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: containerDir) else { return }
         
@@ -473,12 +486,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc private func restartFinder() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        p.arguments = ["Finder"]
-        p.standardInput = FileHandle.nullDevice
-        try? p.run()
-        p.waitUntilExit()
+        let script = """
+        tell application "Finder"
+            quit
+        end tell
+        delay 0.5
+        tell application "Finder"
+            activate
+        end tell
+        """
+        if let appleScript = NSAppleScript(source: script) {
+            var errorInfo: NSDictionary?
+            appleScript.executeAndReturnError(&errorInfo)
+            if errorInfo != nil {
+                // 优雅退出失败时兜底
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+                p.arguments = ["Finder"]
+                p.standardInput = FileHandle.nullDevice
+                try? p.run()
+                p.waitUntilExit()
+            }
+        }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.enableExtension()
@@ -512,7 +541,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "新建 Markdown.md",
             "新建 Word 文档.docx",
             "新建 Excel 工作表.xlsx",
-            "新建 PPT 演示.pptx"
+            "新建 PPT 演示.pptx",
+            "新建 Pages 文稿.pages",
+            "新建 Numbers 表格.numbers",
+            "新建 Keynote 演示.key"
         ]
         
         guard let resourceURL = Bundle.main.resourceURL?.appendingPathComponent("Templates") else {

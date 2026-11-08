@@ -165,7 +165,10 @@ public class FileOperations {
             "新建 Markdown.md",
             "新建 Word 文档.docx",
             "新建 Excel 工作表.xlsx",
-            "新建 PPT 演示.pptx"
+            "新建 PPT 演示.pptx",
+            "新建 Pages 文稿.pages",
+            "新建 Numbers 表格.numbers",
+            "新建 Keynote 演示.key"
         ]
         let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         let filtered = files.filter { !$0.hasPrefix(".") && !defaultNames.contains($0) }
@@ -291,15 +294,16 @@ public class FileOperations {
             case .filename:
                 return url.lastPathComponent
             case .escaped:
-                var escaped = ""
-                let charsToEscape: Set<Character> = [" ", "(", ")", "[", "]", "{", "}", "&", "$", "'", "\"", "*", "?", ";", "@", "`", "!", "|", "<", ">"]
-                for ch in url.path {
-                    if charsToEscape.contains(ch) {
-                        escaped.append("\\")
-                    }
-                    escaped.append(ch)
+                // POSIX Shell 安全转义标准
+                let path = url.path
+                    .replacingOccurrences(of: "\r", with: "")
+                    .replacingOccurrences(of: "\n", with: "")
+                let safeChars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-")
+                if path.unicodeScalars.allSatisfy({ safeChars.contains($0) }) {
+                    return path
                 }
-                return escaped
+                let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+                return "'\(escaped)'"
             }
         }
         
@@ -356,14 +360,33 @@ public class FileOperations {
         return result
     }
     
+    // MARK: - Safe Path Validation (Prevent infinite recursion or self-move/copy)
+    public static func isSafeOperation(source: URL, destinationDirectory: URL) -> Bool {
+        let src = source.standardized.resolvingSymlinksInPath().path
+        let dst = destinationDirectory.standardized.resolvingSymlinksInPath().path
+        if src == dst { return false }
+        if dst.hasPrefix(src + "/") { return false }
+        return true
+    }
+
     public static func moveCutFiles(to destinationFolder: URL) {
         guard let filesToMove = getCutFiles() else { return }
-        let fileManager = FileManager.default
-        var movedURLs: [URL] = []
-        
-        for fileURL in filesToMove {
-            var targetURL = destinationFolder.appendingPathComponent(fileURL.lastPathComponent)
-            if targetURL.path != fileURL.path && !destinationFolder.path.hasPrefix(fileURL.path + "/") {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
+            var movedURLs: [URL] = []
+            
+            for fileURL in filesToMove {
+                guard isSafeOperation(source: fileURL, destinationDirectory: destinationFolder) else {
+                    log("Skipping unsafe cut-move: \(fileURL.path) -> \(destinationFolder.path)")
+                    continue
+                }
+                let sourceParent = fileURL.deletingLastPathComponent().standardized.resolvingSymlinksInPath().path
+                let destPath = destinationFolder.standardized.resolvingSymlinksInPath().path
+                if sourceParent == destPath {
+                    log("Skipping cut-move: source file is already in destination directory: \(fileURL.path)")
+                    continue
+                }
+                var targetURL = destinationFolder.appendingPathComponent(fileURL.lastPathComponent)
                 targetURL = uniqueURL(for: targetURL)
                 do {
                     try fileManager.moveItem(at: fileURL, to: targetURL)
@@ -373,13 +396,20 @@ public class FileOperations {
                     log("Move error: \(error)")
                 }
             }
-        }
-        
-        NSPasteboard.general.clearContents()
-        
-        if !movedURLs.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                NSWorkspace.shared.activateFileViewerSelecting(movedURLs)
+            
+            DispatchQueue.main.async {
+                let pasteboard = NSPasteboard.general
+                if let types = pasteboard.types, types.contains(cutPasteboardType) {
+                    pasteboard.setData(Data(), forType: cutPasteboardType)
+                }
+                cacheLock.lock()
+                cachedCutURLs = nil
+                cacheLock.unlock()
+                
+                if !movedURLs.isEmpty {
+                    NSSound(named: "Glass")?.play()
+                    NSWorkspace.shared.activateFileViewerSelecting(movedURLs)
+                }
             }
         }
     }
@@ -388,50 +418,68 @@ public class FileOperations {
     
     public static func moveFiles(urls: [URL], to destinationDirectory: URL) {
         guard !urls.isEmpty else { return }
-        let fm = FileManager.default
-        var movedURLs: [URL] = []
-        
-        for sourceURL in urls {
-            let targetURL = uniqueURL(for: destinationDirectory.appendingPathComponent(sourceURL.lastPathComponent))
-            if targetURL.path != sourceURL.path {
-                do {
-                    try fm.moveItem(at: sourceURL, to: targetURL)
-                    movedURLs.append(targetURL)
-                    log("Moved: \(sourceURL.path) -> \(targetURL.path)")
-                } catch {
-                    log("Move error: \(error)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fm = FileManager.default
+            var movedURLs: [URL] = []
+            
+            for sourceURL in urls {
+                guard isSafeOperation(source: sourceURL, destinationDirectory: destinationDirectory) else {
+                    log("Skipping unsafe move: \(sourceURL.path) -> \(destinationDirectory.path)")
+                    continue
+                }
+                let sourceParent = sourceURL.deletingLastPathComponent().standardized.resolvingSymlinksInPath().path
+                let destPath = destinationDirectory.standardized.resolvingSymlinksInPath().path
+                if sourceParent == destPath {
+                    log("Skipping move: source file is already in destination directory: \(sourceURL.path)")
+                    continue
+                }
+                let targetURL = uniqueURL(for: destinationDirectory.appendingPathComponent(sourceURL.lastPathComponent))
+                if targetURL.path != sourceURL.path {
+                    do {
+                        try fm.moveItem(at: sourceURL, to: targetURL)
+                        movedURLs.append(targetURL)
+                        log("Moved: \(sourceURL.path) -> \(targetURL.path)")
+                    } catch {
+                        log("Move error: \(error)")
+                    }
                 }
             }
-        }
-        
-        if !movedURLs.isEmpty {
-            DispatchQueue.main.async {
-                NSSound(named: "Glass")?.play()
-                NSWorkspace.shared.activateFileViewerSelecting(movedURLs)
+            
+            if !movedURLs.isEmpty {
+                DispatchQueue.main.async {
+                    NSSound(named: "Glass")?.play()
+                    NSWorkspace.shared.activateFileViewerSelecting(movedURLs)
+                }
             }
         }
     }
     
     public static func copyFiles(urls: [URL], to destinationDirectory: URL) {
         guard !urls.isEmpty else { return }
-        let fm = FileManager.default
-        var copiedURLs: [URL] = []
-        
-        for sourceURL in urls {
-            let targetURL = uniqueURL(for: destinationDirectory.appendingPathComponent(sourceURL.lastPathComponent))
-            do {
-                try fm.copyItem(at: sourceURL, to: targetURL)
-                copiedURLs.append(targetURL)
-                log("Copied: \(sourceURL.path) -> \(targetURL.path)")
-            } catch {
-                log("Copy error: \(error)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fm = FileManager.default
+            var copiedURLs: [URL] = []
+            
+            for sourceURL in urls {
+                guard isSafeOperation(source: sourceURL, destinationDirectory: destinationDirectory) else {
+                    log("Skipping unsafe copy: \(sourceURL.path) -> \(destinationDirectory.path)")
+                    continue
+                }
+                let targetURL = uniqueURL(for: destinationDirectory.appendingPathComponent(sourceURL.lastPathComponent))
+                do {
+                    try fm.copyItem(at: sourceURL, to: targetURL)
+                    copiedURLs.append(targetURL)
+                    log("Copied: \(sourceURL.path) -> \(targetURL.path)")
+                } catch {
+                    log("Copy error: \(error)")
+                }
             }
-        }
-        
-        if !copiedURLs.isEmpty {
-            DispatchQueue.main.async {
-                NSSound(named: "Glass")?.play()
-                NSWorkspace.shared.activateFileViewerSelecting(copiedURLs)
+            
+            if !copiedURLs.isEmpty {
+                DispatchQueue.main.async {
+                    NSSound(named: "Glass")?.play()
+                    NSWorkspace.shared.activateFileViewerSelecting(copiedURLs)
+                }
             }
         }
     }
@@ -569,6 +617,9 @@ public class FileOperations {
         DispatchQueue.global(qos: .userInitiated).async {
             var success = false
             var needsPasswordFallback = false
+            var createdSingleFileURL: URL? = nil
+            let filenameLower = archiveURL.lastPathComponent.lowercased()
+            let isTarArchive = filenameLower.contains(".tar.") || ["tar", "tgz", "tbz", "txz"].contains(ext)
             
             if ext == "zip" {
                 let p = Process()
@@ -588,7 +639,10 @@ public class FileOperations {
                     let unzipProc = Process()
                     unzipProc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
                     unzipProc.standardInput = FileHandle.nullDevice
-                    unzipProc.arguments = ["-q", "-o", "-P", "", archiveURL.path, "-d", destFolder.path]
+                    var env = ProcessInfo.processInfo.environment
+                    env["UNZIP"] = "-P ''"
+                    unzipProc.environment = env
+                    unzipProc.arguments = ["-q", "-o", archiveURL.path, "-d", destFolder.path]
                     try? unzipProc.run()
                     unzipProc.waitUntilExit()
                     let unzipStatus = unzipProc.terminationStatus
@@ -598,7 +652,7 @@ public class FileOperations {
                         needsPasswordFallback = true
                     }
                 }
-            } else if ["tar", "gz", "tgz", "bz2", "tbz", "xz", "txz"].contains(ext) {
+            } else if isTarArchive {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
                 p.standardInput = FileHandle.nullDevice
@@ -610,6 +664,46 @@ public class FileOperations {
                 } catch {
                     log("tar failed: \(error)")
                 }
+            } else if ext == "gz" {
+                let outName = archiveURL.deletingPathExtension().lastPathComponent
+                let outURL = uniqueURL(for: destFolder.appendingPathComponent(outName))
+                fileManager.createFile(atPath: outURL.path, contents: nil)
+                createdSingleFileURL = outURL
+                if let outHandle = try? FileHandle(forWritingTo: outURL) {
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+                    p.standardInput = FileHandle.nullDevice
+                    p.standardOutput = outHandle
+                    p.arguments = ["-dc", archiveURL.path]
+                    do {
+                        try p.run()
+                        p.waitUntilExit()
+                        try? outHandle.close()
+                        success = (p.terminationStatus == 0)
+                    } catch {
+                        log("gzip -dc failed: \(error)")
+                    }
+                }
+            } else if ext == "bz2" {
+                let outName = archiveURL.deletingPathExtension().lastPathComponent
+                let outURL = uniqueURL(for: destFolder.appendingPathComponent(outName))
+                fileManager.createFile(atPath: outURL.path, contents: nil)
+                createdSingleFileURL = outURL
+                if let outHandle = try? FileHandle(forWritingTo: outURL) {
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/usr/bin/bzip2")
+                    p.standardInput = FileHandle.nullDevice
+                    p.standardOutput = outHandle
+                    p.arguments = ["-dc", archiveURL.path]
+                    do {
+                        try p.run()
+                        p.waitUntilExit()
+                        try? outHandle.close()
+                        success = (p.terminationStatus == 0)
+                    } catch {
+                        log("bzip2 -dc failed: \(error)")
+                    }
+                }
             } else {
                 let config = NSWorkspace.OpenConfiguration()
                 config.activates = false
@@ -617,11 +711,16 @@ public class FileOperations {
                 success = true
             }
             
-            // Clean up empty folder if failed
-            if !success && isSeparate {
-                let items = (try? fileManager.contentsOfDirectory(atPath: destFolder.path)) ?? []
-                if items.isEmpty {
-                    try? fileManager.removeItem(at: destFolder)
+            // Clean up empty folder and zero-byte files if failed
+            if !success {
+                if let singleFile = createdSingleFileURL {
+                    try? fileManager.removeItem(at: singleFile)
+                }
+                if isSeparate {
+                    let items = (try? fileManager.contentsOfDirectory(atPath: destFolder.path)) ?? []
+                    if items.isEmpty {
+                        try? fileManager.removeItem(at: destFolder)
+                    }
                 }
             }
             
@@ -644,7 +743,7 @@ public class FileOperations {
                     } else {
                         let afterItems = Set((try? fileManager.contentsOfDirectory(atPath: destFolder.path)) ?? [])
                         let newItems = afterItems.subtracting(beforeItems)
-                        if !newItems.isEmpty {
+                        if !newItems.isEmpty && newItems.count <= 20 {
                             let highlightURLs = newItems.map { destFolder.appendingPathComponent($0) }
                             NSWorkspace.shared.activateFileViewerSelecting(highlightURLs)
                         } else {
@@ -682,7 +781,11 @@ public class FileOperations {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
             p.standardInput = FileHandle.nullDevice
-            p.arguments = ["-q", "-o", "-P", password, archiveURL.path, "-d", destFolder.path]
+            var env = ProcessInfo.processInfo.environment
+            let safePwd = password.replacingOccurrences(of: "\"", with: "\\\"")
+            env["UNZIP"] = "-P \"\(safePwd)\""
+            p.environment = env
+            p.arguments = ["-q", "-o", archiveURL.path, "-d", destFolder.path]
             try? p.run()
             p.waitUntilExit()
             
@@ -711,7 +814,7 @@ public class FileOperations {
                     } else {
                         let afterItems = Set((try? fileManager.contentsOfDirectory(atPath: destFolder.path)) ?? [])
                         let newItems = afterItems.subtracting(beforeItems)
-                        if !newItems.isEmpty {
+                        if !newItems.isEmpty && newItems.count <= 20 {
                             let highlightURLs = newItems.map { destFolder.appendingPathComponent($0) }
                             NSWorkspace.shared.activateFileViewerSelecting(highlightURLs)
                         } else {
@@ -741,12 +844,16 @@ public class FileOperations {
             var success = false
             if isZip {
                 if let pwd = password, !pwd.isEmpty {
-                    // Password protected zip
+                    // Password protected zip: Pass password via ZIPOPT environment variable (hides password from ps aux)
                     let p = Process()
                     p.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
                     p.standardInput = FileHandle.nullDevice
                     p.currentDirectoryURL = parentDir
-                    var args = ["-q", "-r", "-P", pwd, destURL.path]
+                    var env = ProcessInfo.processInfo.environment
+                    let safePwd = pwd.replacingOccurrences(of: "\"", with: "\\\"")
+                    env["ZIPOPT"] = "-P \"\(safePwd)\""
+                    p.environment = env
+                    var args = ["-q", "-r", destURL.path]
                     for url in sourceURLs {
                         args.append(url.lastPathComponent)
                     }

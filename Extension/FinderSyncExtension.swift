@@ -15,10 +15,9 @@ public class QuickMenuSyncExtension: FIFinderSync {
         let fm = FileManager.default
         let home = FileOperations.realHomeURL
         
-        // 1. 全盘根路径与挂载卷（确保任何层级的空白处均能命中监控）
-        monitored.insert(URL(fileURLWithPath: "/"))
+        // 1. 核心工作目录与挂载卷（避免监听全盘根目录 / 及 /Users，防止访达卡顿与高负荷 IPC）
+        monitored.insert(home)
         monitored.insert(URL(fileURLWithPath: "/Volumes"))
-        monitored.insert(URL(fileURLWithPath: "/Users"))
         monitored.insert(URL(fileURLWithPath: "/Applications"))
         
         // 2. 用户主目录与各关键子目录（桌面、文稿、下载等显式加入，解决 macOS 对桌面容器判定的间歇性丢失）
@@ -340,15 +339,15 @@ public class QuickMenuSyncExtension: FIFinderSync {
     }
     
     @objc public func actionNewPages(_ sender: Any) {
-        dispatchCreateFile(defaultName: "新建文档.pages", templateName: "新建 文本文档.txt")
+        dispatchCreateFile(defaultName: "未命名.pages", templateName: "新建 Pages 文稿.pages")
     }
     
     @objc public func actionNewNumbers(_ sender: Any) {
-        dispatchCreateFile(defaultName: "新建表格.numbers", templateName: "新建 Excel 工作表.xlsx")
+        dispatchCreateFile(defaultName: "未命名.numbers", templateName: "新建 Numbers 表格.numbers")
     }
     
     @objc public func actionNewKeynote(_ sender: Any) {
-        dispatchCreateFile(defaultName: "新建演示.key", templateName: "新建 PPT 演示.pptx")
+        dispatchCreateFile(defaultName: "未命名.key", templateName: "新建 Keynote 演示.key")
     }
     
     @objc public func actionNewCustomTemplate(_ sender: NSMenuItem) {

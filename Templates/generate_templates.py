@@ -80,4 +80,11 @@ with open(os.path.join(dir_path, '新建 Markdown.md'), 'w', encoding='utf-8') a
 create_docx(os.path.join(dir_path, '新建 Word 文档.docx'))
 create_xlsx(os.path.join(dir_path, '新建 Excel 工作表.xlsx'))
 create_pptx(os.path.join(dir_path, '新建 PPT 演示.pptx'))
+
+# Ensure iWork templates exist
+for tmpl in ['新建 Pages 文稿.pages', '新建 Numbers 表格.numbers', '新建 Keynote 演示.key']:
+    tmpl_path = os.path.join(dir_path, tmpl)
+    if not os.path.exists(tmpl_path):
+        print(f"Warning: {tmpl} not found in {dir_path}")
+
 print("All templates generated!")
